@@ -1,0 +1,36 @@
+# Least-privilege RBAC for agones-mcp: grants exactly the verbs its 18
+# Kubernetes-facing tools use, nothing more. list_clusters and the three
+# open_match_* tools make no Kubernetes API calls and need no permissions
+# here.
+#
+# If deploying in-cluster, bind this ClusterRole to the Pod's service
+# account with a ClusterRoleBinding (or a RoleBinding scoped to one
+# namespace, if this server only ever targets a single namespace).
+# If deploying out-of-cluster via kubeconfig, apply an equivalent grant to
+# whichever identity that kubeconfig authenticates as.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agones-mcp
+rules:
+  - apiGroups: ["agones.dev"]
+    resources: ["fleets"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: ["agones.dev"]
+    resources: ["gameservers"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: ["agones.dev"]
+    resources: ["gameserversets"]
+    verbs: ["list"]
+  - apiGroups: ["autoscaling.agones.dev"]
+    resources: ["fleetautoscalers"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: ["allocation.agones.dev"]
+    resources: ["gameserverallocations"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]

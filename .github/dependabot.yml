@@ -1,0 +1,18 @@
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      # k8s.io/* modules version in lockstep (v0.34.x tracks Kubernetes
+      # 1.34); bumping them independently risks leaving the supported
+      # version-skew window. Agones pins its own supported Kubernetes range,
+      # so review its updates against the k8s.io group, not in isolation.
+      kubernetes:
+        patterns:
+          - "k8s.io/*"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

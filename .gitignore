@@ -1,0 +1,5 @@
+agones-mcp
+agones-mcp.exe
+*.log
+coverage.out
+coverage
