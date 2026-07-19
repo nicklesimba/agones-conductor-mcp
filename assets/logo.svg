@@ -1,52 +1,25 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <clipPath id="frame"><rect x="2" y="2" width="124" height="124" rx="26"/></clipPath>
-
   <rect x="2" y="2" width="124" height="124" rx="26" fill="#FFFFFF"/>
-
-  <!-- background notes: the fleet, awaiting the downbeat -->
-  <g clip-path="url(#frame)" fill="#2d70de" opacity="0.15">
-    <g transform="translate(22,30)">
-      <ellipse cx="0" cy="0" rx="4.5" ry="3.4" transform="rotate(-20)"/>
-      <rect x="3.4" y="-17" width="2" height="17.5"/>
-    </g>
-    <g transform="translate(106,88)">
-      <ellipse cx="0" cy="0" rx="3.8" ry="2.9" transform="rotate(-20)"/>
-      <rect x="2.8" y="-14" width="1.8" height="14.5"/>
-    </g>
-    <circle cx="38" cy="14" r="2.2"/>
-    <circle cx="116" cy="52" r="2.2"/>
-  </g>
-
   <rect x="2" y="2" width="124" height="124" rx="26" fill="none" stroke="#2d70de" stroke-width="2"/>
 
-  <!-- conductor -->
-  <g stroke="#2d70de" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none">
-    <!-- head -->
-    <circle cx="64" cy="40" r="10" fill="#FFFFFF"/>
-    <!-- torso / tailcoat -->
-    <path d="M 48 110 C 50 80, 55 64, 64 62 C 73 64, 78 80, 80 110"/>
-    <!-- lapels -->
-    <path d="M 57 63 L 64 76 L 71 63"/>
-    <!-- coat-tail split -->
-    <path d="M 64 84 L 64 104"/>
-    <!-- raised arm, mid-downbeat -->
-    <path d="M 76 66 C 86 58, 92 46, 97 36"/>
-    <!-- off arm, holding the phrase -->
-    <path d="M 52 66 C 42 62, 34 54, 30 46"/>
-  </g>
-  <!-- hands -->
+  <!-- conductor: one continuous silhouette, arm raised mid-downbeat -->
   <g fill="#2d70de">
-    <circle cx="98" cy="34" r="3.2"/>
-    <circle cx="29" cy="45" r="3.2"/>
+    <path d="M 28 108 C 28 82 41 68 58 68 C 75 68 88 82 88 108 Z"/>
+    <rect x="52.5" y="44" width="11" height="28"/>
+    <circle cx="58" cy="38" r="13"/>
   </g>
+  <path d="M 80 82 C 88 70 94 58 100 46" fill="none" stroke="#2d70de" stroke-width="9" stroke-linecap="round"/>
 
-  <!-- baton -->
-  <path d="M 101 31 L 117 13" stroke="#17252e" stroke-width="3.5" stroke-linecap="round"/>
+  <!-- collar -->
+  <path d="M 48.5 68.5 L 58 87 L 67.5 68.5 Z" fill="#FFFFFF"/>
 
   <!-- bowtie -->
   <g fill="#17252e">
-    <path d="M 62 56 L 53 51.5 L 53 60.5 Z"/>
-    <path d="M 66 56 L 75 51.5 L 75 60.5 Z"/>
-    <circle cx="64" cy="56" r="2.4"/>
+    <path d="M 56 72.5 L 47.5 68 L 47.5 77 Z"/>
+    <path d="M 60 72.5 L 68.5 68 L 68.5 77 Z"/>
+    <circle cx="58" cy="72.5" r="2.6"/>
   </g>
+
+  <!-- baton -->
+  <path d="M 103 42 L 118 22" fill="none" stroke="#17252e" stroke-width="4" stroke-linecap="round"/>
 </svg>
