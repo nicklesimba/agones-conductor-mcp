@@ -6,7 +6,7 @@ require (
 	agones.dev/agones v1.57.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	google.golang.org/grpc v1.79.3
-	google.golang.org/protobuf v1.36.10
+	google.golang.org/protobuf v1.36.11
 	k8s.io/api v0.34.0
 	k8s.io/apimachinery v0.34.0
 	k8s.io/client-go v0.34.0
