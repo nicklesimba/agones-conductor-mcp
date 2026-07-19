@@ -6,6 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/nicklesimba/agones-conductor-mcp/actions/workflows/ci.yml"><img src="https://github.com/nicklesimba/agones-conductor-mcp/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/nicklesimba/agones-conductor-mcp/actions/workflows/e2e.yml"><img src="https://github.com/nicklesimba/agones-conductor-mcp/actions/workflows/e2e.yml/badge.svg" alt="E2E" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache-2.0" /></a>
 </p>
 
@@ -63,7 +64,7 @@ A real example, "How full is the ranked fleet?", calling `fleet_capacity`:
 
 Every tool above except `list_clusters` also accepts an optional `cluster` argument (see [Multi-cluster](#multi-cluster)). Every write tool except `allocate_gameserver` accepts `dryRun: true` for a server-side validation pass that persists nothing, so an agent can show its work before the real call. The three `open_match_*` tools additionally require Open Match connectivity to be configured (see [Open Match](#open-match)) and return a clear error if it isn't.
 
-All 27 tools have been exercised against a live Agones cluster (kind + Agones 1.57), not just unit-tested against fakes:
+All 27 tools are exercised against a live Agones cluster (kind + Agones 1.57), not just unit-tested against fakes - and not on the honor system: the same 45-check suite runs in public CI on every push (`test/e2e/mcp_e2e.py`, [e2e.yml](.github/workflows/e2e.yml)), driving the real binary over MCP stdio as a least-privilege ServiceAccount against a fresh kind cluster. Highlights of what it covers, plus one-off deep verifications done during development:
 
 - `delete_gameserver`'s safety gate: refusal without `force`, success with it, and a race test proving the refusal still holds if a server is allocated between the check and the delete.
 - `scale_fleet` scale-down/up leaving live allocations untouched, including under a simulated concurrent write (the FleetAutoscaler writes `Fleet.Spec.Replicas` too).

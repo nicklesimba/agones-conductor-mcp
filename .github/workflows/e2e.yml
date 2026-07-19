@@ -1,0 +1,73 @@
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Build
+        run: go build -o agones-conductor-mcp .
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: agones-e2e
+
+      - name: Install Agones
+        run: |
+          helm repo add agones https://agones.dev/chart/stable
+          helm repo update
+          helm install agones agones/agones \
+            --namespace agones-system --create-namespace \
+            --version 1.57.0 --wait --timeout 10m
+
+      - name: Deploy the example fleet
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/googleforgames/agones/release-1.57.0/examples/simple-game-server/fleet.yaml
+          kubectl wait fleet/simple-fleet --for=jsonpath='{.status.readyReplicas}'=2 --timeout=300s
+
+      - name: Provision least-privilege ServiceAccount
+        run: |
+          kubectl apply -f deploy/rbac.yaml
+          kubectl create serviceaccount agones-e2e -n default
+          kubectl create clusterrolebinding agones-e2e \
+            --clusterrole=agones-conductor-mcp \
+            --serviceaccount=default:agones-e2e
+          TOKEN=$(kubectl create token agones-e2e -n default --duration=1h)
+          SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+          CA=$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
+          cat > sa-kubeconfig.yaml <<EOF
+          apiVersion: v1
+          kind: Config
+          clusters:
+          - name: e2e
+            cluster:
+              server: $SERVER
+              certificate-authority-data: $CA
+          contexts:
+          - name: sa
+            context:
+              cluster: e2e
+              user: sa
+          current-context: sa
+          users:
+          - name: sa
+            user:
+              token: $TOKEN
+          EOF
+
+      - name: Run end-to-end suite
+        run: python3 test/e2e/mcp_e2e.py ./agones-conductor-mcp sa-kubeconfig.yaml
