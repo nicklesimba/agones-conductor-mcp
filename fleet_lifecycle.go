@@ -21,6 +21,7 @@ type CreateFleetInput struct {
 	ContainerName  string                      `json:"containerName,omitempty" jsonschema:"Name for the game server container; defaults to game-server"`
 	ContainerPort  int32                       `json:"containerPort" jsonschema:"Port the game server process listens on inside the container, 1-65535"`
 	PortPolicy     string                      `json:"portPolicy,omitempty" jsonschema:"Dynamic, Static, Passthrough, or None; defaults to Dynamic"`
+	Protocol       string                      `json:"protocol,omitempty" jsonschema:"Port protocol: UDP, TCP, or TCPUDP (both protocols on the same port number); defaults to UDP, matching Agones"`
 	CPURequest     string                      `json:"cpuRequest,omitempty" jsonschema:"e.g. 100m; omit to leave unset"`
 	CPULimit       string                      `json:"cpuLimit,omitempty" jsonschema:"e.g. 500m; omit to leave unset"`
 	MemoryRequest  string                      `json:"memoryRequest,omitempty" jsonschema:"e.g. 128Mi; omit to leave unset"`
@@ -29,6 +30,7 @@ type CreateFleetInput struct {
 	Counters       map[string]CounterInitInput `json:"counters,omitempty" jsonschema:"Initial Counters to declare on this fleet's GameServers, keyed by counter name (requires the CountsAndLists feature; Counter/List keys can only be declared here at creation time, not added later)"`
 	Lists          map[string]ListInitInput    `json:"lists,omitempty" jsonschema:"Initial Lists to declare on this fleet's GameServers, keyed by list name"`
 	PlayerCapacity int64                       `json:"playerCapacity,omitempty" jsonschema:"Initial player capacity for this fleet's GameServers (requires the PlayerTracking alpha feature); omit or 0 to leave player tracking off"`
+	DryRun         bool                        `json:"dryRun,omitempty" jsonschema:"Validate server-side without creating anything; the response shows what would have been created"`
 	Cluster        string                      `json:"cluster,omitempty" jsonschema:"Cluster to target; omit for the default cluster"`
 }
 
@@ -77,7 +79,8 @@ func buildInitialLists(in map[string]ListInitInput) (map[string]agonesv1.ListSta
 }
 
 type CreateFleetOutput struct {
-	Fleet FleetSummary `json:"fleet"`
+	Fleet  FleetSummary `json:"fleet"`
+	DryRun bool         `json:"dryRun,omitempty" jsonschema:"True: nothing was actually created"`
 }
 
 func (s *server) createFleet(ctx context.Context, req *mcp.CallToolRequest, in CreateFleetInput) (*mcp.CallToolResult, CreateFleetOutput, error) {
@@ -113,6 +116,16 @@ func (s *server) createFleet(ctx context.Context, req *mcp.CallToolRequest, in C
 			scheduling = apis.SchedulingStrategy(in.Scheduling)
 		default:
 			return nil, CreateFleetOutput{}, fmt.Errorf("scheduling must be Packed or Distributed; got %q", in.Scheduling)
+		}
+	}
+
+	protocol := corev1.ProtocolUDP
+	if in.Protocol != "" {
+		switch corev1.Protocol(in.Protocol) {
+		case corev1.ProtocolUDP, corev1.ProtocolTCP, agonesv1.ProtocolTCPUDP:
+			protocol = corev1.Protocol(in.Protocol)
+		default:
+			return nil, CreateFleetOutput{}, fmt.Errorf("protocol must be UDP, TCP, or TCPUDP; got %q", in.Protocol)
 		}
 	}
 
@@ -155,6 +168,7 @@ func (s *server) createFleet(ctx context.Context, req *mcp.CallToolRequest, in C
 					Ports: []agonesv1.GameServerPort{{
 						Name:          "default",
 						PortPolicy:    portPolicy,
+						Protocol:      protocol,
 						ContainerPort: in.ContainerPort,
 					}},
 					Template: corev1.PodTemplateSpec{
@@ -171,11 +185,11 @@ func (s *server) createFleet(ctx context.Context, req *mcp.CallToolRequest, in C
 		},
 	}
 
-	created, err := cl.agones.AgonesV1().Fleets(in.Namespace).Create(ctx, fleet, metav1.CreateOptions{})
+	created, err := cl.agones.AgonesV1().Fleets(in.Namespace).Create(ctx, fleet, metav1.CreateOptions{DryRun: dryRunOpt(in.DryRun)})
 	if err != nil {
 		return nil, CreateFleetOutput{}, fmt.Errorf("creating fleet: %w", err)
 	}
-	return nil, CreateFleetOutput{Fleet: fleetSummary(created)}, nil
+	return nil, CreateFleetOutput{Fleet: fleetSummary(created), DryRun: in.DryRun}, nil
 }
 
 func buildResourceRequirements(cpuRequest, cpuLimit, memRequest, memLimit string) (corev1.ResourceRequirements, error) {
@@ -207,12 +221,14 @@ type DeleteFleetInput struct {
 	Name      string `json:"name" jsonschema:"Fleet name"`
 	Namespace string `json:"namespace" jsonschema:"Kubernetes namespace (required: this tool targets one specific Fleet, so there's no 'all namespaces' option)"`
 	Force     bool   `json:"force,omitempty" jsonschema:"Set true only if you intend to disconnect any players on GameServers under this fleet - required if any are Allocated"`
+	DryRun    bool   `json:"dryRun,omitempty" jsonschema:"Validate server-side without deleting anything; the response shows what would have happened"`
 	Cluster   string `json:"cluster,omitempty" jsonschema:"Cluster to target; omit for the default cluster"`
 }
 
 type DeleteFleetOutput struct {
 	Deleted   bool   `json:"deleted"`
 	Allocated int32  `json:"allocated"`
+	DryRun    bool   `json:"dryRun,omitempty" jsonschema:"True: nothing was actually deleted"`
 	Warning   string `json:"warning,omitempty"`
 }
 
@@ -252,12 +268,12 @@ func (s *server) deleteFleet(ctx context.Context, req *mcp.CallToolRequest, in D
 		}, nil
 	}
 
-	if err := cl.agones.AgonesV1().Fleets(in.Namespace).Delete(ctx, in.Name, metav1.DeleteOptions{}); err != nil {
+	if err := cl.agones.AgonesV1().Fleets(in.Namespace).Delete(ctx, in.Name, metav1.DeleteOptions{DryRun: dryRunOpt(in.DryRun)}); err != nil {
 		return nil, DeleteFleetOutput{}, fmt.Errorf("deleting fleet: %w", err)
 	}
 	warning := ""
-	if in.Force && allocated > 0 {
+	if in.Force && allocated > 0 && !in.DryRun {
 		warning = fmt.Sprintf("force-deleted fleet with %d Allocated GameServer(s); those players are being disconnected", allocated)
 	}
-	return nil, DeleteFleetOutput{Deleted: true, Allocated: allocated, Warning: warning}, nil
+	return nil, DeleteFleetOutput{Deleted: true, Allocated: allocated, DryRun: in.DryRun, Warning: warning}, nil
 }

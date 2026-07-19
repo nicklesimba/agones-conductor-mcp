@@ -19,6 +19,7 @@ type UpdateFleetImageInput struct {
 	Namespace string `json:"namespace" jsonschema:"Kubernetes namespace (required: this tool targets one specific Fleet, so there's no 'all namespaces' option)"`
 	Image     string `json:"image" jsonschema:"New container image, e.g. gcr.io/my-project/my-game:v2"`
 	Container string `json:"container,omitempty" jsonschema:"Container name to update; required only if the GameServer template defines more than one container"`
+	DryRun    bool   `json:"dryRun,omitempty" jsonschema:"Validate server-side without persisting anything"`
 	Cluster   string `json:"cluster,omitempty" jsonschema:"Cluster to target; omit for the default cluster"`
 }
 
@@ -27,6 +28,7 @@ type UpdateFleetImageOutput struct {
 	Container     string `json:"container"`
 	PreviousImage string `json:"previousImage"`
 	NewImage      string `json:"newImage"`
+	DryRun        bool   `json:"dryRun,omitempty" jsonschema:"True: nothing was actually changed"`
 }
 
 // Patches the image and lets Agones's own rolling update handle the rest;
@@ -52,7 +54,7 @@ func (s *server) updateFleetImage(ctx context.Context, req *mcp.CallToolRequest,
 		}
 		previous := containers[idx].Image
 		fleet.Spec.Template.Spec.Template.Spec.Containers[idx].Image = in.Image
-		updated, err := cl.agones.AgonesV1().Fleets(in.Namespace).Update(ctx, fleet, metav1.UpdateOptions{})
+		updated, err := cl.agones.AgonesV1().Fleets(in.Namespace).Update(ctx, fleet, metav1.UpdateOptions{DryRun: dryRunOpt(in.DryRun)})
 		if err != nil {
 			return err
 		}
@@ -62,6 +64,7 @@ func (s *server) updateFleetImage(ctx context.Context, req *mcp.CallToolRequest,
 			Container:     containers[idx].Name,
 			PreviousImage: previous,
 			NewImage:      updated.Spec.Template.Spec.Template.Spec.Containers[idx].Image,
+			DryRun:        in.DryRun,
 		}
 		return nil
 	})

@@ -14,10 +14,20 @@ import (
 // Sanity ceiling against a hallucinated or malicious replica count.
 const maxScaleFleetReplicas = 100_000
 
+// Server-side dry run: the API server validates (including admission
+// webhooks) but persists nothing.
+func dryRunOpt(dryRun bool) []string {
+	if dryRun {
+		return []string{metav1.DryRunAll}
+	}
+	return nil
+}
+
 type ScaleFleetInput struct {
 	Name      string `json:"name" jsonschema:"Fleet name"`
 	Namespace string `json:"namespace" jsonschema:"Kubernetes namespace (required: this tool targets one specific Fleet, so there's no 'all namespaces' option)"`
 	Replicas  int32  `json:"replicas" jsonschema:"Target replica count; must be >= 0 and <= 100000"`
+	DryRun    bool   `json:"dryRun,omitempty" jsonschema:"Validate server-side without persisting anything; the response shows what would have happened"`
 	Cluster   string `json:"cluster,omitempty" jsonschema:"Cluster to target; omit for the default cluster"`
 }
 
@@ -26,6 +36,7 @@ type ScaleFleetOutput struct {
 	PreviousReplicas int32  `json:"previousReplicas"`
 	TargetReplicas   int32  `json:"targetReplicas"`
 	Allocated        int32  `json:"allocated"`
+	DryRun           bool   `json:"dryRun,omitempty" jsonschema:"True: nothing was actually changed"`
 	Note             string `json:"note"`
 }
 
@@ -49,7 +60,7 @@ func (s *server) scaleFleet(ctx context.Context, req *mcp.CallToolRequest, in Sc
 		}
 		prev := fleet.Spec.Replicas
 		fleet.Spec.Replicas = in.Replicas
-		if _, err := cl.agones.AgonesV1().Fleets(in.Namespace).Update(ctx, fleet, metav1.UpdateOptions{}); err != nil {
+		if _, err := cl.agones.AgonesV1().Fleets(in.Namespace).Update(ctx, fleet, metav1.UpdateOptions{DryRun: dryRunOpt(in.DryRun)}); err != nil {
 			return err
 		}
 		note := "scaled"
@@ -61,6 +72,7 @@ func (s *server) scaleFleet(ctx context.Context, req *mcp.CallToolRequest, in Sc
 			PreviousReplicas: prev,
 			TargetReplicas:   in.Replicas,
 			Allocated:        fleet.Status.AllocatedReplicas,
+			DryRun:           in.DryRun,
 			Note:             note,
 		}
 		return nil
@@ -225,6 +237,9 @@ func buildPlayerSelector(in *PlayerSelectorInput) (*allocationv1.PlayerSelector,
 type AllocateInput struct {
 	Fleet            string                          `json:"fleet" jsonschema:"Fleet to allocate a server from"`
 	Namespace        string                          `json:"namespace" jsonschema:"Kubernetes namespace (required: this tool targets one specific Fleet, so there's no 'all namespaces' option)"`
+	PreferReuse      bool                            `json:"preferReuse,omitempty" jsonschema:"Try an already-Allocated server matching the filters first, falling back to a Ready one. The high-density pattern: land players on running matches with room instead of starting a new server"`
+	Labels           map[string]string               `json:"labels,omitempty" jsonschema:"Labels stamped onto the allocated GameServer at allocation time (e.g. match ID, game mode)"`
+	Annotations      map[string]string               `json:"annotations,omitempty" jsonschema:"Annotations stamped onto the allocated GameServer at allocation time"`
 	CounterSelectors map[string]CounterSelectorInput `json:"counterSelectors,omitempty" jsonschema:"Only allocate a GameServer whose Counters match these filters, keyed by counter name (requires the CountsAndLists feature and counters declared on the GameServer template)"`
 	ListSelectors    map[string]ListSelectorInput    `json:"listSelectors,omitempty" jsonschema:"Only allocate a GameServer whose Lists match these filters, keyed by list name"`
 	PlayerSelector   *PlayerSelectorInput            `json:"playerSelector,omitempty" jsonschema:"Only allocate a GameServer whose available player capacity matches (requires the PlayerTracking and PlayerAllocationFilter alpha features)"`
@@ -242,48 +257,81 @@ type AllocateOutput struct {
 	Lists      map[string]agonesv1.ListStatus    `json:"lists,omitempty"`
 }
 
+func buildAllocation(in AllocateInput) (*allocationv1.GameServerAllocation, error) {
+	counterActions, err := buildCounterActions(in.CounterActions)
+	if err != nil {
+		return nil, err
+	}
+	listActions, err := buildListActions(in.ListActions)
+	if err != nil {
+		return nil, err
+	}
+	counterSelectors, err := buildCounterSelectors(in.CounterSelectors)
+	if err != nil {
+		return nil, err
+	}
+	listSelectors, err := buildListSelectors(in.ListSelectors)
+	if err != nil {
+		return nil, err
+	}
+	playerSelector, err := buildPlayerSelector(in.PlayerSelector)
+	if err != nil {
+		return nil, err
+	}
+	for k := range in.Labels {
+		if k == "" {
+			return nil, fmt.Errorf("labels: empty key")
+		}
+	}
+	for k := range in.Annotations {
+		if k == "" {
+			return nil, fmt.Errorf("annotations: empty key")
+		}
+	}
+
+	base := allocationv1.GameServerSelector{
+		LabelSelector: metav1.LabelSelector{
+			MatchLabels: map[string]string{agonesv1.FleetNameLabel: in.Fleet},
+		},
+		Counters: counterSelectors,
+		Lists:    listSelectors,
+		Players:  playerSelector,
+	}
+	selectors := []allocationv1.GameServerSelector{base}
+	if in.PreferReuse {
+		// Ordered preference: a running match with room first, a fresh
+		// Ready server as the fallback.
+		reuse, fresh := base, base
+		allocated, ready := agonesv1.GameServerStateAllocated, agonesv1.GameServerStateReady
+		reuse.GameServerState = &allocated
+		fresh.GameServerState = &ready
+		selectors = []allocationv1.GameServerSelector{reuse, fresh}
+	}
+
+	alloc := &allocationv1.GameServerAllocation{
+		Spec: allocationv1.GameServerAllocationSpec{
+			Selectors: selectors,
+			Counters:  counterActions,
+			Lists:     listActions,
+		},
+	}
+	if len(in.Labels) > 0 || len(in.Annotations) > 0 {
+		alloc.Spec.MetaPatch = allocationv1.MetaPatch{Labels: in.Labels, Annotations: in.Annotations}
+	}
+	return alloc, nil
+}
+
 func (s *server) allocateGameServer(ctx context.Context, req *mcp.CallToolRequest, in AllocateInput) (*mcp.CallToolResult, AllocateOutput, error) {
 	if in.Fleet == "" {
 		return nil, AllocateOutput{}, fmt.Errorf("fleet is required")
 	}
-	counterActions, err := buildCounterActions(in.CounterActions)
+	alloc, err := buildAllocation(in)
 	if err != nil {
 		return nil, AllocateOutput{}, err
 	}
-	listActions, err := buildListActions(in.ListActions)
-	if err != nil {
-		return nil, AllocateOutput{}, err
-	}
-	counterSelectors, err := buildCounterSelectors(in.CounterSelectors)
-	if err != nil {
-		return nil, AllocateOutput{}, err
-	}
-	listSelectors, err := buildListSelectors(in.ListSelectors)
-	if err != nil {
-		return nil, AllocateOutput{}, err
-	}
-	playerSelector, err := buildPlayerSelector(in.PlayerSelector)
-	if err != nil {
-		return nil, AllocateOutput{}, err
-	}
-
 	cl, err := s.c.get(in.Cluster)
 	if err != nil {
 		return nil, AllocateOutput{}, err
-	}
-	alloc := &allocationv1.GameServerAllocation{
-		Spec: allocationv1.GameServerAllocationSpec{
-			Selectors: []allocationv1.GameServerSelector{{
-				LabelSelector: metav1.LabelSelector{
-					MatchLabels: map[string]string{agonesv1.FleetNameLabel: in.Fleet},
-				},
-				Counters: counterSelectors,
-				Lists:    listSelectors,
-				Players:  playerSelector,
-			}},
-			Counters: counterActions,
-			Lists:    listActions,
-		},
 	}
 	result, err := cl.agones.AllocationV1().GameServerAllocations(in.Namespace).Create(ctx, alloc, metav1.CreateOptions{})
 	if err != nil {
@@ -306,12 +354,14 @@ type DeleteGameServerInput struct {
 	Name      string `json:"name" jsonschema:"GameServer name"`
 	Namespace string `json:"namespace" jsonschema:"Kubernetes namespace (required: this tool targets one specific GameServer, so there's no 'all namespaces' option)"`
 	Force     bool   `json:"force,omitempty" jsonschema:"Set true only if you intend to disconnect any players currently on this server - required to delete an Allocated server with a live match"`
+	DryRun    bool   `json:"dryRun,omitempty" jsonschema:"Validate server-side without deleting anything; the response shows what would have happened"`
 	Cluster   string `json:"cluster,omitempty" jsonschema:"Cluster to target; omit for the default cluster"`
 }
 
 type DeleteGameServerOutput struct {
 	Deleted bool   `json:"deleted"`
 	State   string `json:"state"`
+	DryRun  bool   `json:"dryRun,omitempty" jsonschema:"True: nothing was actually deleted"`
 	Warning string `json:"warning,omitempty"`
 }
 
@@ -342,15 +392,16 @@ func (s *server) deleteGameServer(ctx context.Context, req *mcp.CallToolRequest,
 		}
 		deleteErr := cl.agones.AgonesV1().GameServers(in.Namespace).Delete(ctx, in.Name, metav1.DeleteOptions{
 			Preconditions: &metav1.Preconditions{ResourceVersion: &gs.ResourceVersion},
+			DryRun:        dryRunOpt(in.DryRun),
 		})
 		if deleteErr != nil {
 			return deleteErr
 		}
 		warning := ""
-		if in.Force && gs.Status.State == agonesv1.GameServerStateAllocated {
+		if in.Force && gs.Status.State == agonesv1.GameServerStateAllocated && !in.DryRun {
 			warning = fmt.Sprintf("force-deleted Allocated server; players on %s are being disconnected", gs.Status.Address)
 		}
-		out = DeleteGameServerOutput{Deleted: true, State: state, Warning: warning}
+		out = DeleteGameServerOutput{Deleted: true, State: state, DryRun: in.DryRun, Warning: warning}
 		return nil
 	})
 	if err != nil {

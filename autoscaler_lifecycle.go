@@ -70,33 +70,137 @@ func validateBufferBounds(bufferSize intstr.IntOrString, minReplicas, maxReplica
 	return nil
 }
 
+// CapacityPolicyInput configures a Counter- or List-based scaling policy:
+// the autoscaler sizes the fleet by aggregate counter/list capacity (e.g.
+// total free player slots) instead of by whole Ready servers.
+type CapacityPolicyInput struct {
+	Key         string `json:"key" jsonschema:"Name of the Counter or List declared on the fleet's GameServer template to scale on"`
+	BufferSize  string `json:"bufferSize" jsonschema:"Free-capacity buffer to maintain across the fleet: an absolute count > 0 (e.g. '20') or a percentage 1%-99% (e.g. '10%')"`
+	MinCapacity int64  `json:"minCapacity,omitempty" jsonschema:"Minimum aggregate capacity floor. For an absolute bufferSize, must be 0 or >= bufferSize; for a percentage, must be >= 1"`
+	MaxCapacity int64  `json:"maxCapacity" jsonschema:"Maximum aggregate capacity ceiling; must be > 0, >= minCapacity, and >= bufferSize when bufferSize is absolute"`
+}
+
+func buildCapacityPolicy(kind string, in *CapacityPolicyInput) (intstr.IntOrString, error) {
+	if in == nil {
+		return intstr.IntOrString{}, fmt.Errorf("policy %q requires the %s field", kind, strings.ToLower(kind))
+	}
+	if in.Key == "" {
+		return intstr.IntOrString{}, fmt.Errorf("%s.key is required", strings.ToLower(kind))
+	}
+	bufferSize, err := parseBufferSize(in.BufferSize)
+	if err != nil {
+		return intstr.IntOrString{}, err
+	}
+	if in.MaxCapacity <= 0 {
+		return intstr.IntOrString{}, fmt.Errorf("%s.maxCapacity must be > 0, got %d", strings.ToLower(kind), in.MaxCapacity)
+	}
+	if in.MinCapacity < 0 || in.MinCapacity > in.MaxCapacity {
+		return intstr.IntOrString{}, fmt.Errorf("%s.minCapacity must be >= 0 and <= maxCapacity (%d), got %d", strings.ToLower(kind), in.MaxCapacity, in.MinCapacity)
+	}
+	if bufferSize.Type == intstr.Int {
+		bs := int64(bufferSize.IntValue())
+		if in.MaxCapacity < bs {
+			return intstr.IntOrString{}, fmt.Errorf("%s.maxCapacity (%d) must be >= bufferSize (%d)", strings.ToLower(kind), in.MaxCapacity, bs)
+		}
+		if in.MinCapacity != 0 && in.MinCapacity < bs {
+			return intstr.IntOrString{}, fmt.Errorf("%s.minCapacity (%d) must be 0 or >= bufferSize (%d)", strings.ToLower(kind), in.MinCapacity, bs)
+		}
+	} else if in.MinCapacity < 1 {
+		return intstr.IntOrString{}, fmt.Errorf("%s.minCapacity must be >= 1 when bufferSize is a percentage", strings.ToLower(kind))
+	}
+	return bufferSize, nil
+}
+
+func buildSync(seconds int32) (*autoscalingv1.FleetAutoscalerSync, error) {
+	if seconds == 0 {
+		return nil, nil
+	}
+	if seconds < 0 {
+		return nil, fmt.Errorf("syncIntervalSeconds must be > 0, got %d", seconds)
+	}
+	return &autoscalingv1.FleetAutoscalerSync{
+		Type:          autoscalingv1.FixedIntervalSyncType,
+		FixedInterval: autoscalingv1.FixedIntervalSync{Seconds: seconds},
+	}, nil
+}
+
 type CreateAutoscalerInput struct {
-	Name        string `json:"name" jsonschema:"FleetAutoscaler name"`
-	Namespace   string `json:"namespace" jsonschema:"Kubernetes namespace (required: this tool targets one specific FleetAutoscaler, so there's no 'all namespaces' option)"`
-	Fleet       string `json:"fleet" jsonschema:"Name of the Fleet this autoscaler controls"`
-	BufferSize  string `json:"bufferSize" jsonschema:"Target Ready buffer the autoscaler maintains: an absolute count > 0 (e.g. '5') or a percentage 1%-99% of desired replicas (e.g. '20%')"`
-	MinReplicas int32  `json:"minReplicas,omitempty" jsonschema:"Minimum replica floor. For an absolute bufferSize, must be 0 (no minimum) or >= bufferSize. For a percentage bufferSize, must be >= 1 (Agones can't guarantee a percentage buffer with no minimum)"`
-	MaxReplicas int32  `json:"maxReplicas" jsonschema:"Maximum replica ceiling; must be > 0, >= minReplicas, and >= bufferSize when bufferSize is absolute"`
-	Cluster     string `json:"cluster,omitempty" jsonschema:"Cluster to target; omit for the default cluster"`
+	Name                string               `json:"name" jsonschema:"FleetAutoscaler name"`
+	Namespace           string               `json:"namespace" jsonschema:"Kubernetes namespace (required: this tool targets one specific FleetAutoscaler, so there's no 'all namespaces' option)"`
+	Fleet               string               `json:"fleet" jsonschema:"Name of the Fleet this autoscaler controls"`
+	Policy              string               `json:"policy,omitempty" jsonschema:"Buffer (default: maintain N Ready servers), Counter, or List (scale on aggregate counter/list capacity via the counter/list field)"`
+	BufferSize          string               `json:"bufferSize,omitempty" jsonschema:"Buffer policy only. Target Ready buffer the autoscaler maintains: an absolute count > 0 (e.g. '5') or a percentage 1%-99% of desired replicas (e.g. '20%')"`
+	MinReplicas         int32                `json:"minReplicas,omitempty" jsonschema:"Buffer policy only. Minimum replica floor. For an absolute bufferSize, must be 0 (no minimum) or >= bufferSize. For a percentage bufferSize, must be >= 1"`
+	MaxReplicas         int32                `json:"maxReplicas,omitempty" jsonschema:"Buffer policy only. Maximum replica ceiling; must be > 0, >= minReplicas, and >= bufferSize when bufferSize is absolute"`
+	Counter             *CapacityPolicyInput `json:"counter,omitempty" jsonschema:"Counter policy configuration (requires policy=Counter and the CountsAndLists feature)"`
+	List                *CapacityPolicyInput `json:"list,omitempty" jsonschema:"List policy configuration (requires policy=List)"`
+	SyncIntervalSeconds int32                `json:"syncIntervalSeconds,omitempty" jsonschema:"Seconds between autoscaler evaluations; omit for Agones's default (30). Lower it (e.g. 5) for burst-heavy matchmaking"`
+	DryRun              bool                 `json:"dryRun,omitempty" jsonschema:"Validate server-side without creating anything"`
+	Cluster             string               `json:"cluster,omitempty" jsonschema:"Cluster to target; omit for the default cluster"`
 }
 
 type CreateAutoscalerOutput struct {
 	Autoscaler AutoscalerSummary `json:"autoscaler"`
+	DryRun     bool              `json:"dryRun,omitempty" jsonschema:"True: nothing was actually created"`
 }
 
-// This tool only builds Buffer-policy autoscalers. Counter/List/Webhook/Schedule/Chain/Wasm
-// policies are feature-gated or depend on infrastructure this server doesn't manage (an
-// external webhook, a WASM module), so they're out of scope here.
+// Webhook/Schedule/Chain/Wasm policies are out of scope: they depend on
+// infrastructure this server doesn't manage (an external webhook, a WASM
+// module).
 func (s *server) createAutoscaler(ctx context.Context, req *mcp.CallToolRequest, in CreateAutoscalerInput) (*mcp.CallToolResult, CreateAutoscalerOutput, error) {
 	if in.Fleet == "" {
 		return nil, CreateAutoscalerOutput{}, fmt.Errorf("fleet is required")
 	}
-	bufferSize, err := parseBufferSize(in.BufferSize)
+	sync, err := buildSync(in.SyncIntervalSeconds)
 	if err != nil {
 		return nil, CreateAutoscalerOutput{}, err
 	}
-	if err := validateBufferBounds(bufferSize, in.MinReplicas, in.MaxReplicas); err != nil {
-		return nil, CreateAutoscalerOutput{}, err
+
+	policy := autoscalingv1.FleetAutoscalerPolicy{}
+	switch in.Policy {
+	case "", string(autoscalingv1.BufferPolicyType):
+		if in.Counter != nil || in.List != nil {
+			return nil, CreateAutoscalerOutput{}, fmt.Errorf("counter/list fields require policy=Counter or policy=List")
+		}
+		bufferSize, err := parseBufferSize(in.BufferSize)
+		if err != nil {
+			return nil, CreateAutoscalerOutput{}, err
+		}
+		if err := validateBufferBounds(bufferSize, in.MinReplicas, in.MaxReplicas); err != nil {
+			return nil, CreateAutoscalerOutput{}, err
+		}
+		policy.Type = autoscalingv1.BufferPolicyType
+		policy.Buffer = &autoscalingv1.BufferPolicy{
+			BufferSize:  bufferSize,
+			MinReplicas: in.MinReplicas,
+			MaxReplicas: in.MaxReplicas,
+		}
+	case string(autoscalingv1.CounterPolicyType):
+		bufferSize, err := buildCapacityPolicy("Counter", in.Counter)
+		if err != nil {
+			return nil, CreateAutoscalerOutput{}, err
+		}
+		policy.Type = autoscalingv1.CounterPolicyType
+		policy.Counter = &autoscalingv1.CounterPolicy{
+			Key:         in.Counter.Key,
+			BufferSize:  bufferSize,
+			MinCapacity: in.Counter.MinCapacity,
+			MaxCapacity: in.Counter.MaxCapacity,
+		}
+	case string(autoscalingv1.ListPolicyType):
+		bufferSize, err := buildCapacityPolicy("List", in.List)
+		if err != nil {
+			return nil, CreateAutoscalerOutput{}, err
+		}
+		policy.Type = autoscalingv1.ListPolicyType
+		policy.List = &autoscalingv1.ListPolicy{
+			Key:         in.List.Key,
+			BufferSize:  bufferSize,
+			MinCapacity: in.List.MinCapacity,
+			MaxCapacity: in.List.MaxCapacity,
+		}
+	default:
+		return nil, CreateAutoscalerOutput{}, fmt.Errorf("policy must be Buffer, Counter, or List; got %q", in.Policy)
 	}
 
 	cl, err := s.c.get(in.Cluster)
@@ -108,40 +212,37 @@ func (s *server) createAutoscaler(ctx context.Context, req *mcp.CallToolRequest,
 		ObjectMeta: metav1.ObjectMeta{Name: in.Name, Namespace: in.Namespace},
 		Spec: autoscalingv1.FleetAutoscalerSpec{
 			FleetName: in.Fleet,
-			Policy: autoscalingv1.FleetAutoscalerPolicy{
-				Type: autoscalingv1.BufferPolicyType,
-				Buffer: &autoscalingv1.BufferPolicy{
-					BufferSize:  bufferSize,
-					MinReplicas: in.MinReplicas,
-					MaxReplicas: in.MaxReplicas,
-				},
-			},
+			Policy:    policy,
+			Sync:      sync,
 		},
 	}
 
-	created, err := cl.agones.AutoscalingV1().FleetAutoscalers(in.Namespace).Create(ctx, fa, metav1.CreateOptions{})
+	created, err := cl.agones.AutoscalingV1().FleetAutoscalers(in.Namespace).Create(ctx, fa, metav1.CreateOptions{DryRun: dryRunOpt(in.DryRun)})
 	if err != nil {
 		return nil, CreateAutoscalerOutput{}, fmt.Errorf("creating autoscaler: %w", err)
 	}
-	return nil, CreateAutoscalerOutput{Autoscaler: autoscalerSummary(created)}, nil
+	return nil, CreateAutoscalerOutput{Autoscaler: autoscalerSummary(created), DryRun: in.DryRun}, nil
 }
 
 type UpdateAutoscalerInput struct {
-	Name        string  `json:"name" jsonschema:"FleetAutoscaler name"`
-	Namespace   string  `json:"namespace" jsonschema:"Kubernetes namespace (required: this tool targets one specific FleetAutoscaler, so there's no 'all namespaces' option)"`
-	BufferSize  *string `json:"bufferSize,omitempty" jsonschema:"New buffer size, absolute count or percentage like '20%'; omit to leave unchanged"`
-	MinReplicas *int32  `json:"minReplicas,omitempty" jsonschema:"New minimum replica floor; omit to leave unchanged (0 is a valid explicit value meaning no minimum)"`
-	MaxReplicas *int32  `json:"maxReplicas,omitempty" jsonschema:"New maximum replica ceiling; omit to leave unchanged"`
-	Cluster     string  `json:"cluster,omitempty" jsonschema:"Cluster to target; omit for the default cluster"`
+	Name                string  `json:"name" jsonschema:"FleetAutoscaler name"`
+	Namespace           string  `json:"namespace" jsonschema:"Kubernetes namespace (required: this tool targets one specific FleetAutoscaler, so there's no 'all namespaces' option)"`
+	BufferSize          *string `json:"bufferSize,omitempty" jsonschema:"New buffer size, absolute count or percentage like '20%'; omit to leave unchanged"`
+	MinReplicas         *int32  `json:"minReplicas,omitempty" jsonschema:"New minimum replica floor; omit to leave unchanged (0 is a valid explicit value meaning no minimum)"`
+	MaxReplicas         *int32  `json:"maxReplicas,omitempty" jsonschema:"New maximum replica ceiling; omit to leave unchanged"`
+	SyncIntervalSeconds *int32  `json:"syncIntervalSeconds,omitempty" jsonschema:"New seconds between autoscaler evaluations; omit to leave unchanged"`
+	DryRun              bool    `json:"dryRun,omitempty" jsonschema:"Validate server-side without persisting anything"`
+	Cluster             string  `json:"cluster,omitempty" jsonschema:"Cluster to target; omit for the default cluster"`
 }
 
 type UpdateAutoscalerOutput struct {
 	Autoscaler AutoscalerSummary `json:"autoscaler"`
+	DryRun     bool              `json:"dryRun,omitempty" jsonschema:"True: nothing was actually changed"`
 }
 
 func (s *server) updateAutoscaler(ctx context.Context, req *mcp.CallToolRequest, in UpdateAutoscalerInput) (*mcp.CallToolResult, UpdateAutoscalerOutput, error) {
-	if in.BufferSize == nil && in.MinReplicas == nil && in.MaxReplicas == nil {
-		return nil, UpdateAutoscalerOutput{}, fmt.Errorf("at least one of bufferSize, minReplicas, maxReplicas must be provided")
+	if in.BufferSize == nil && in.MinReplicas == nil && in.MaxReplicas == nil && in.SyncIntervalSeconds == nil {
+		return nil, UpdateAutoscalerOutput{}, fmt.Errorf("at least one of bufferSize, minReplicas, maxReplicas, syncIntervalSeconds must be provided")
 	}
 	var newBuffer intstr.IntOrString
 	if in.BufferSize != nil {
@@ -163,22 +264,31 @@ func (s *server) updateAutoscaler(ctx context.Context, req *mcp.CallToolRequest,
 		if err != nil {
 			return err
 		}
-		if fa.Spec.Policy.Buffer == nil {
-			return fmt.Errorf("autoscaler %q is a %s-policy autoscaler; this tool only updates Buffer-policy autoscalers", in.Name, fa.Spec.Policy.Type)
+		if in.BufferSize != nil || in.MinReplicas != nil || in.MaxReplicas != nil {
+			if fa.Spec.Policy.Buffer == nil {
+				return fmt.Errorf("autoscaler %q is a %s-policy autoscaler; bufferSize/minReplicas/maxReplicas only apply to Buffer-policy autoscalers", in.Name, fa.Spec.Policy.Type)
+			}
+			if in.BufferSize != nil {
+				fa.Spec.Policy.Buffer.BufferSize = newBuffer
+			}
+			if in.MinReplicas != nil {
+				fa.Spec.Policy.Buffer.MinReplicas = *in.MinReplicas
+			}
+			if in.MaxReplicas != nil {
+				fa.Spec.Policy.Buffer.MaxReplicas = *in.MaxReplicas
+			}
+			if err := validateBufferBounds(fa.Spec.Policy.Buffer.BufferSize, fa.Spec.Policy.Buffer.MinReplicas, fa.Spec.Policy.Buffer.MaxReplicas); err != nil {
+				return err
+			}
 		}
-		if in.BufferSize != nil {
-			fa.Spec.Policy.Buffer.BufferSize = newBuffer
+		if in.SyncIntervalSeconds != nil {
+			sync, err := buildSync(*in.SyncIntervalSeconds)
+			if err != nil || sync == nil {
+				return fmt.Errorf("syncIntervalSeconds must be > 0, got %d", *in.SyncIntervalSeconds)
+			}
+			fa.Spec.Sync = sync
 		}
-		if in.MinReplicas != nil {
-			fa.Spec.Policy.Buffer.MinReplicas = *in.MinReplicas
-		}
-		if in.MaxReplicas != nil {
-			fa.Spec.Policy.Buffer.MaxReplicas = *in.MaxReplicas
-		}
-		if err := validateBufferBounds(fa.Spec.Policy.Buffer.BufferSize, fa.Spec.Policy.Buffer.MinReplicas, fa.Spec.Policy.Buffer.MaxReplicas); err != nil {
-			return err
-		}
-		updated, err := cl.agones.AutoscalingV1().FleetAutoscalers(in.Namespace).Update(ctx, fa, metav1.UpdateOptions{})
+		updated, err := cl.agones.AutoscalingV1().FleetAutoscalers(in.Namespace).Update(ctx, fa, metav1.UpdateOptions{DryRun: dryRunOpt(in.DryRun)})
 		if err != nil {
 			return err
 		}
@@ -188,17 +298,19 @@ func (s *server) updateAutoscaler(ctx context.Context, req *mcp.CallToolRequest,
 	if err != nil {
 		return nil, UpdateAutoscalerOutput{}, err
 	}
-	return nil, UpdateAutoscalerOutput{Autoscaler: out}, nil
+	return nil, UpdateAutoscalerOutput{Autoscaler: out, DryRun: in.DryRun}, nil
 }
 
 type DeleteAutoscalerInput struct {
 	Name      string `json:"name" jsonschema:"FleetAutoscaler name"`
 	Namespace string `json:"namespace" jsonschema:"Kubernetes namespace (required: this tool targets one specific FleetAutoscaler, so there's no 'all namespaces' option)"`
+	DryRun    bool   `json:"dryRun,omitempty" jsonschema:"Validate server-side without deleting anything"`
 	Cluster   string `json:"cluster,omitempty" jsonschema:"Cluster to target; omit for the default cluster"`
 }
 
 type DeleteAutoscalerOutput struct {
 	Deleted bool `json:"deleted"`
+	DryRun  bool `json:"dryRun,omitempty" jsonschema:"True: nothing was actually deleted"`
 }
 
 // Deleting a FleetAutoscaler only removes the autoscaler object itself; the
@@ -208,8 +320,8 @@ func (s *server) deleteAutoscaler(ctx context.Context, req *mcp.CallToolRequest,
 	if err != nil {
 		return nil, DeleteAutoscalerOutput{}, err
 	}
-	if err := cl.agones.AutoscalingV1().FleetAutoscalers(in.Namespace).Delete(ctx, in.Name, metav1.DeleteOptions{}); err != nil {
+	if err := cl.agones.AutoscalingV1().FleetAutoscalers(in.Namespace).Delete(ctx, in.Name, metav1.DeleteOptions{DryRun: dryRunOpt(in.DryRun)}); err != nil {
 		return nil, DeleteAutoscalerOutput{}, fmt.Errorf("deleting autoscaler: %w", err)
 	}
-	return nil, DeleteAutoscalerOutput{Deleted: true}, nil
+	return nil, DeleteAutoscalerOutput{Deleted: true, DryRun: in.DryRun}, nil
 }

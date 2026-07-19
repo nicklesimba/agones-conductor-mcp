@@ -1,4 +1,4 @@
-module github.com/nicklesimba/agones-mcp
+module github.com/nicklesimba/agones-conductor-mcp
 
 go 1.25.0
 

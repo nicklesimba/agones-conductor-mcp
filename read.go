@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -276,6 +277,129 @@ func (s *server) gameServerEvents(ctx context.Context, req *mcp.CallToolRequest,
 	return nil, out, nil
 }
 
+// fetchEventsForObject lists events for one named object and keeps only the
+// wanted kinds. Shared by the fleet/autoscaler event tools; gameServerEvents
+// keeps its own paginated path.
+func fetchEventsForObject(ctx context.Context, cl *clients, namespace, name string, kinds map[string]bool) ([]EventRecord, error) {
+	list, err := cl.core.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: fmt.Sprintf("involvedObject.name=%s", name),
+	})
+	if err != nil {
+		return nil, err
+	}
+	records := []EventRecord{}
+	for _, e := range list.Items {
+		if e.InvolvedObject.Name != name || !kinds[e.InvolvedObject.Kind] {
+			continue
+		}
+		records = append(records, EventRecord{
+			Kind:    e.InvolvedObject.Kind,
+			Type:    e.Type,
+			Reason:  e.Reason,
+			Message: truncateEventMessage(e.Message),
+			Count:   e.Count,
+			LastAt:  eventTimestamp(&e),
+		})
+	}
+	return records, nil
+}
+
+type FleetEventsInput struct {
+	Name      string `json:"name" jsonschema:"Fleet name"`
+	Namespace string `json:"namespace" jsonschema:"Kubernetes namespace (required: this tool targets one specific Fleet, so there's no 'all namespaces' option)"`
+	Cluster   string `json:"cluster,omitempty" jsonschema:"Cluster to target; omit for the default cluster"`
+}
+
+// Scaling and rollout decisions land as events on the Fleet and on its
+// GameServerSets, so both are collected here.
+func (s *server) fleetEvents(ctx context.Context, req *mcp.CallToolRequest, in FleetEventsInput) (*mcp.CallToolResult, EventsOutput, error) {
+	cl, err := s.c.get(in.Cluster)
+	if err != nil {
+		return nil, EventsOutput{}, err
+	}
+	out := EventsOutput{Notice: eventsUntrustedNotice, Events: []EventRecord{}}
+	records, err := fetchEventsForObject(ctx, cl, in.Namespace, in.Name, map[string]bool{"Fleet": true})
+	if err != nil {
+		return nil, EventsOutput{}, err
+	}
+	out.Events = append(out.Events, records...)
+
+	setList, err := cl.agones.AgonesV1().GameServerSets(in.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("%s=%s", agonesv1.FleetNameLabel, in.Name),
+	})
+	if err != nil {
+		return nil, EventsOutput{}, err
+	}
+	for _, gss := range setList.Items {
+		if gss.Labels[agonesv1.FleetNameLabel] != in.Name {
+			continue
+		}
+		records, err := fetchEventsForObject(ctx, cl, in.Namespace, gss.Name, map[string]bool{"GameServerSet": true})
+		if err != nil {
+			return nil, EventsOutput{}, err
+		}
+		out.Events = append(out.Events, records...)
+	}
+	sort.Slice(out.Events, func(i, j int) bool { return out.Events[i].LastAt < out.Events[j].LastAt })
+	return nil, out, nil
+}
+
+type AutoscalerEventsInput struct {
+	Name      string `json:"name" jsonschema:"FleetAutoscaler name"`
+	Namespace string `json:"namespace" jsonschema:"Kubernetes namespace (required: this tool targets one specific FleetAutoscaler, so there's no 'all namespaces' option)"`
+	Cluster   string `json:"cluster,omitempty" jsonschema:"Cluster to target; omit for the default cluster"`
+}
+
+func (s *server) autoscalerEvents(ctx context.Context, req *mcp.CallToolRequest, in AutoscalerEventsInput) (*mcp.CallToolResult, EventsOutput, error) {
+	cl, err := s.c.get(in.Cluster)
+	if err != nil {
+		return nil, EventsOutput{}, err
+	}
+	records, err := fetchEventsForObject(ctx, cl, in.Namespace, in.Name, map[string]bool{"FleetAutoscaler": true})
+	if err != nil {
+		return nil, EventsOutput{}, err
+	}
+	return nil, EventsOutput{Notice: eventsUntrustedNotice, Events: records}, nil
+}
+
+type GetGameServerInput struct {
+	Name      string `json:"name" jsonschema:"GameServer name"`
+	Namespace string `json:"namespace" jsonschema:"Kubernetes namespace (required: this tool targets one specific GameServer, so there's no 'all namespaces' option)"`
+	Cluster   string `json:"cluster,omitempty" jsonschema:"Cluster to target; omit for the default cluster"`
+}
+
+type GameServerDetail struct {
+	GameServerSummary
+	GameServerSet   string            `json:"gameServerSet,omitempty"`
+	Image           string            `json:"image,omitempty"`
+	Container       string            `json:"container,omitempty" jsonschema:"The game container named by the GameServer spec"`
+	Created         string            `json:"created"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	Annotations     map[string]string `json:"annotations,omitempty"`
+	DeletionPending bool              `json:"deletionPending,omitempty" jsonschema:"True while the server is terminating; its state field may still read Allocated/Ready"`
+}
+
+func (s *server) getGameServer(ctx context.Context, req *mcp.CallToolRequest, in GetGameServerInput) (*mcp.CallToolResult, GameServerDetail, error) {
+	cl, err := s.c.get(in.Cluster)
+	if err != nil {
+		return nil, GameServerDetail{}, err
+	}
+	gs, err := cl.agones.AgonesV1().GameServers(in.Namespace).Get(ctx, in.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, GameServerDetail{}, err
+	}
+	return nil, GameServerDetail{
+		GameServerSummary: gameServerSummary(gs),
+		GameServerSet:     gs.Labels[agonesv1.GameServerSetGameServerLabel],
+		Image:             gameServerContainerImage(gs.Spec),
+		Container:         gs.Spec.Container,
+		Created:           gs.CreationTimestamp.Time.Format(time.RFC3339),
+		Labels:            gs.Labels,
+		Annotations:       gs.Annotations,
+		DeletionPending:   gs.DeletionTimestamp != nil,
+	}, nil
+}
+
 // Events recorded via the newer events.k8s.io path can have a zero
 // LastTimestamp; fall back rather than reporting year 1.
 func eventTimestamp(e *corev1.Event) string {
@@ -311,16 +435,20 @@ func truncateEventMessage(msg string) string {
 }
 
 type AutoscalerSummary struct {
-	Name           string `json:"name"`
-	Namespace      string `json:"namespace"`
-	Fleet          string `json:"fleet"`
-	PolicyType     string `json:"policyType"`
-	BufferSize     string `json:"bufferSize,omitempty"`
-	MinReplicas    int32  `json:"minReplicas,omitempty"`
-	MaxReplicas    int32  `json:"maxReplicas,omitempty"`
-	Current        int32  `json:"currentReplicas"`
-	Desired        int32  `json:"desiredReplicas"`
-	ScalingLimited bool   `json:"scalingLimited"`
+	Name                string `json:"name"`
+	Namespace           string `json:"namespace"`
+	Fleet               string `json:"fleet"`
+	PolicyType          string `json:"policyType"`
+	BufferSize          string `json:"bufferSize,omitempty"`
+	MinReplicas         int32  `json:"minReplicas,omitempty"`
+	MaxReplicas         int32  `json:"maxReplicas,omitempty"`
+	Key                 string `json:"key,omitempty" jsonschema:"Counter/List policies: the counter or list being scaled on"`
+	MinCapacity         int64  `json:"minCapacity,omitempty"`
+	MaxCapacity         int64  `json:"maxCapacity,omitempty"`
+	SyncIntervalSeconds int32  `json:"syncIntervalSeconds,omitempty" jsonschema:"Seconds between evaluations; 0 means Agones's default (30)"`
+	Current             int32  `json:"currentReplicas"`
+	Desired             int32  `json:"desiredReplicas"`
+	ScalingLimited      bool   `json:"scalingLimited" jsonschema:"Clamped at EITHER bound - check desired vs min/max to tell floor from ceiling"`
 }
 
 func autoscalerSummary(a *autoscalingv1.FleetAutoscaler) AutoscalerSummary {
@@ -337,6 +465,21 @@ func autoscalerSummary(a *autoscalingv1.FleetAutoscaler) AutoscalerSummary {
 		sum.BufferSize = a.Spec.Policy.Buffer.BufferSize.String()
 		sum.MinReplicas = a.Spec.Policy.Buffer.MinReplicas
 		sum.MaxReplicas = a.Spec.Policy.Buffer.MaxReplicas
+	}
+	if a.Spec.Policy.Counter != nil {
+		sum.BufferSize = a.Spec.Policy.Counter.BufferSize.String()
+		sum.Key = a.Spec.Policy.Counter.Key
+		sum.MinCapacity = a.Spec.Policy.Counter.MinCapacity
+		sum.MaxCapacity = a.Spec.Policy.Counter.MaxCapacity
+	}
+	if a.Spec.Policy.List != nil {
+		sum.BufferSize = a.Spec.Policy.List.BufferSize.String()
+		sum.Key = a.Spec.Policy.List.Key
+		sum.MinCapacity = a.Spec.Policy.List.MinCapacity
+		sum.MaxCapacity = a.Spec.Policy.List.MaxCapacity
+	}
+	if a.Spec.Sync != nil {
+		sum.SyncIntervalSeconds = a.Spec.Sync.FixedInterval.Seconds
 	}
 	return sum
 }

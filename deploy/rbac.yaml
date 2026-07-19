@@ -1,5 +1,5 @@
-# Least-privilege RBAC for agones-mcp: grants exactly the verbs its 18
-# Kubernetes-facing tools use, nothing more. list_clusters and the three
+# Least-privilege RBAC for agones-conductor-mcp: grants exactly the verbs
+# its Kubernetes-facing tools use, nothing more. list_clusters and the three
 # open_match_* tools make no Kubernetes API calls and need no permissions
 # here.
 #
@@ -11,7 +11,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: agones-mcp
+  name: agones-conductor-mcp
 rules:
   - apiGroups: ["agones.dev"]
     resources: ["fleets"]
@@ -34,3 +34,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  # Used only by agones_health, which lists label-selected pods in the
+  # Agones install namespace (agones-system by default). If cluster-wide pod
+  # listing is unacceptable, replace this rule with an equivalent namespaced
+  # Role + RoleBinding in that one namespace.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]

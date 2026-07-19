@@ -28,7 +28,7 @@ func main() {
 	}
 	s := &server{c: reg}
 
-	srv := mcp.NewServer(&mcp.Implementation{Name: "agones-mcp", Version: version()}, nil)
+	srv := mcp.NewServer(&mcp.Implementation{Name: "agones-conductor-mcp", Version: version()}, nil)
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_clusters",
@@ -46,9 +46,24 @@ func main() {
 	}, s.listGameServers)
 
 	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "get_gameserver",
+		Description: "Full detail for one GameServer: state, address, node, labels, annotations, counters/lists, image, and whether it's mid-termination",
+	}, s.getGameServer)
+
+	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "gameserver_events",
 		Description: "Get Kubernetes events for a GameServer to diagnose failures and state transitions",
 	}, s.gameServerEvents)
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "fleet_events",
+		Description: "Kubernetes events for a Fleet and its GameServerSets: scaling decisions, rollout triggers - answers 'why did the fleet scale down?'",
+	}, s.fleetEvents)
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "autoscaler_events",
+		Description: "Kubernetes events for a FleetAutoscaler: when and why it scaled its fleet",
+	}, s.autoscalerEvents)
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "gameserver_logs",
@@ -77,12 +92,12 @@ func main() {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "create_autoscaler",
-		Description: "Create a Buffer-policy FleetAutoscaler that keeps a target number (or percentage) of Ready servers available on a Fleet",
+		Description: "Create a FleetAutoscaler: Buffer policy (keep N Ready servers), or Counter/List policy (scale on aggregate capacity, e.g. total free player slots). Sync interval configurable",
 	}, s.createAutoscaler)
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "update_autoscaler",
-		Description: "Update a Buffer-policy FleetAutoscaler's buffer size, minimum, or maximum replicas",
+		Description: "Update a FleetAutoscaler's buffer size, minimum/maximum replicas (Buffer policy), or sync interval",
 	}, s.updateAutoscaler)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -97,7 +112,7 @@ func main() {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "allocate_gameserver",
-		Description: "Allocate a Ready GameServer from a fleet for a match, returning its address and ports. Optionally filter by Counter/List state (e.g. available player slots) and apply Counter/List changes at allocation time",
+		Description: "Allocate a GameServer from a fleet for a match, returning its address and ports. Optionally filter by Counter/List state, apply Counter/List changes, stamp labels/annotations (match ID) at allocation time, or prefer reusing an Allocated server with room (preferReuse)",
 	}, s.allocateGameServer)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -119,6 +134,16 @@ func main() {
 		Name:        "update_fleet_health",
 		Description: "Update a Fleet's health-check settings (disabled, periodSeconds, failureThreshold, initialDelaySeconds), triggering Agones's own allocation-aware rolling update",
 	}, s.updateFleetHealth)
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "update_fleet_env",
+		Description: "Set or remove environment variables on a Fleet's container, triggering Agones's own allocation-aware rolling update",
+	}, s.updateFleetEnv)
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "agones_health",
+		Description: "Health of Agones itself: controller/allocator/extensions/ping pod readiness and restart counts - the first check when nothing else makes sense",
+	}, s.agonesHealth)
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "rollout_status",

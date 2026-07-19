@@ -1,6 +1,13 @@
-# agones-mcp
+<p align="center">
+  <img src="assets/logo.svg" width="120" alt="agones-conductor-mcp logo" />
+</p>
 
-[![CI](https://github.com/nicklesimba/agones-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/nicklesimba/agones-mcp/actions/workflows/ci.yml) [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+<h1 align="center">agones-conductor-mcp</h1>
+
+<p align="center">
+  <a href="https://github.com/nicklesimba/agones-conductor-mcp/actions/workflows/ci.yml"><img src="https://github.com/nicklesimba/agones-conductor-mcp/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache-2.0" /></a>
+</p>
 
 An MCP server for [Agones](https://agones.dev), the Kubernetes-native dedicated game server platform. Requires an Agones cluster you already have access to (see [Requirements](#requirements)).
 
@@ -28,30 +35,35 @@ A real example, "How full is the ranked fleet?", calling `fleet_capacity`:
 |---|---|---|
 | `list_fleets` | read | Fleets with desired/ready/allocated/reserved counts |
 | `list_gameservers` | read | GameServers, filterable by state or fleet |
+| `get_gameserver` | read | Full detail for one GameServer: labels, annotations, counters/lists, node, image, termination status |
 | `gameserver_events` | read | Kubernetes events for a GameServer (diagnose failures) |
+| `fleet_events` | read | Events for a Fleet and its GameServerSets: answers "why did the fleet scale down?" |
+| `autoscaler_events` | read | Events for a FleetAutoscaler: when and why it scaled |
 | `gameserver_logs` | read | Container logs for a GameServer (verified to be one first; this is not a general pod log reader). Defaults to the game container, `container` overrides; `previous=true` for a crashed instance |
 | `list_autoscalers` | read | FleetAutoscalers with policy, bounds, scaling-limited status |
 | `fleet_capacity` | read | Cross-fleet utilization report computed from live GameServer state, not the aggregated Fleet status, which lags a few seconds behind real allocation events. Utilization is allocated / (allocated + ready): the share of playable servers in use |
-| `create_fleet` | write | Create a Fleet with a single-container GameServer template, optionally declaring initial Counters/Lists |
+| `create_fleet` | write | Create a Fleet with a single-container GameServer template: port policy and protocol (UDP/TCP/TCPUDP), resources, scheduling, initial Counters/Lists |
 | `delete_fleet` | write | Delete a Fleet and its GameServers; refuses if any are Allocated unless `force=true` |
 | `scale_fleet` | write | Set fleet replicas; scale-down never disrupts live matches |
-| `allocate_gameserver` | write | Allocate a Ready server for a match; optionally filter and update Counters/Lists (e.g. available player slots) at allocation time |
+| `allocate_gameserver` | write | Allocate a server for a match; filter and update Counters/Lists at allocation time, stamp match labels/annotations onto the server, or set `preferReuse` to pack players onto running matches with room first |
 | `delete_gameserver` | write | Delete a server; refuses Allocated servers unless `force=true` |
 | `update_fleet_image` | write | Update a Fleet's container image, triggering Agones's own allocation-aware rolling update |
 | `update_fleet_resources` | write | Update a Fleet container's CPU/memory requests and limits, triggering the same rolling update |
-| `update_fleet_health` | write | Update a Fleet's health-check settings (enabled, period, failure threshold, initial delay), triggering the same rolling update |
+| `update_fleet_health` | write | Update a Fleet's health-check settings (disabled, periodSeconds, failureThreshold, initialDelaySeconds), triggering the same rolling update |
+| `update_fleet_env` | write | Set or remove environment variables on a Fleet's container, triggering the same rolling update |
 | `rollout_status` | read | Rolling-update progress: current vs previous GameServerSets, percent complete, and a warning when old-version servers still have live matches blocking completion |
-| `create_autoscaler` | write | Create a Buffer-policy FleetAutoscaler that keeps a target Ready buffer on a Fleet |
-| `update_autoscaler` | write | Update a FleetAutoscaler's buffer size, minimum, or maximum replicas |
+| `create_autoscaler` | write | Create a FleetAutoscaler: Buffer policy (keep N Ready servers) or Counter/List policy (scale on aggregate capacity, e.g. total free player slots), with a configurable sync interval |
+| `update_autoscaler` | write | Update a FleetAutoscaler's buffer size, replica bounds, or sync interval |
 | `delete_autoscaler` | write | Delete a FleetAutoscaler; the Fleet and its GameServers are unaffected |
+| `agones_health` | read | Is Agones itself healthy? Controller/allocator/extensions/ping pod readiness and restarts |
 | `list_clusters` | read | List configured clusters and which one is the default (only meaningful in multi-cluster mode) |
 | `open_match_create_ticket` | write | Enter a player/party into [Open Match](https://open-match.dev) matchmaking, returns a ticket ID |
 | `open_match_ticket_status` | read | Check a ticket: still searching, or matched with a connection assignment |
 | `open_match_cancel_ticket` | write | Withdraw a ticket from matchmaking |
 
-Every tool above except `list_clusters` also accepts an optional `cluster` argument (see [Multi-cluster](#multi-cluster)). The three `open_match_*` tools additionally require Open Match connectivity to be configured (see [Open Match](#open-match)) and return a clear error if it isn't.
+Every tool above except `list_clusters` also accepts an optional `cluster` argument (see [Multi-cluster](#multi-cluster)). Every write tool except `allocate_gameserver` accepts `dryRun: true` for a server-side validation pass that persists nothing, so an agent can show its work before the real call. The three `open_match_*` tools additionally require Open Match connectivity to be configured (see [Open Match](#open-match)) and return a clear error if it isn't.
 
-All 22 tools have been exercised against a live Agones cluster (kind + Agones 1.57), not just unit-tested against fakes:
+All 27 tools have been exercised against a live Agones cluster (kind + Agones 1.57), not just unit-tested against fakes:
 
 - `delete_gameserver`'s safety gate: refusal without `force`, success with it, and a race test proving the refusal still holds if a server is allocated between the check and the delete.
 - `scale_fleet` scale-down/up leaving live allocations untouched, including under a simulated concurrent write (the FleetAutoscaler writes `Fleet.Spec.Replicas` too).
@@ -94,18 +106,18 @@ kubectl apply -f https://raw.githubusercontent.com/googleforgames/agones/release
 ## Install
 
 ```sh
-go install github.com/nicklesimba/agones-mcp@latest
+go install github.com/nicklesimba/agones-conductor-mcp@latest
 ```
 
 The binary lands in `$(go env GOPATH)/bin` (add it to your PATH if it isn't already). Or build from source:
 
 ```sh
-git clone https://github.com/nicklesimba/agones-mcp
-cd agones-mcp
-go build -o agones-mcp .
+git clone https://github.com/nicklesimba/agones-conductor-mcp
+cd agones-conductor-mcp
+go build -o agones-conductor-mcp .
 ```
 
-On Windows, build with `-o agones-mcp.exe`, and use the full path with escaped backslashes in JSON configs (e.g. `"C:\\tools\\agones-mcp.exe"`).
+On Windows, build with `-o agones-conductor-mcp.exe`, and use the full path with escaped backslashes in JSON configs (e.g. `"C:\\tools\\agones-conductor-mcp.exe"`).
 
 ## Configure
 
@@ -114,7 +126,7 @@ The server authenticates using your [kubeconfig](https://kubernetes.io/docs/conc
 Claude Code:
 
 ```sh
-claude mcp add agones -- /path/to/agones-mcp
+claude mcp add agones -- /path/to/agones-conductor-mcp
 ```
 
 Claude Desktop / Cursor (`mcpServers` config):
@@ -123,7 +135,7 @@ Claude Desktop / Cursor (`mcpServers` config):
 {
   "mcpServers": {
     "agones": {
-      "command": "/path/to/agones-mcp",
+      "command": "/path/to/agones-conductor-mcp",
       "env": { "AGONES_MCP_CONTEXT": "my-cluster" }
     }
   }
@@ -140,7 +152,7 @@ By default the server targets a single cluster (in-cluster config, or the kubeco
 {
   "mcpServers": {
     "agones": {
-      "command": "/path/to/agones-mcp",
+      "command": "/path/to/agones-conductor-mcp",
       "env": { "AGONES_MCP_CLUSTERS": "us-west,us-east,eu-central" }
     }
   }
@@ -154,8 +166,8 @@ The first name listed is the default (override with `AGONES_MCP_CONTEXT`). Every
 Skip this section unless you already run [Open Match](https://open-match.dev). It's a separate matchmaking system, not something Agones needs. The `open_match_*` tools are off by default; without configuration they just return a clear "not configured" error.
 
 If you do run it, these tools connect to its Frontend service over gRPC **without TLS**. The connection is plaintext, matching Open Match's own default in-cluster deployment, so keep the Frontend unexposed to untrusted networks: use in-cluster DNS or a `kubectl port-forward` rather than exposing it publicly. `AGONES_MCP_OPEN_MATCH_FRONTEND` needs a `host:port` this server can actually reach. Concretely, one of:
-- **In-cluster DNS name** (e.g. `open-match-frontend.open-match.svc.cluster.local:50504`) - works if `agones-mcp` itself runs as a Pod in the same cluster.
-- **[NodePort or LoadBalancer](https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types)** - a Kubernetes Service type that exposes something inside the cluster to the outside; use this if `agones-mcp` runs outside the cluster.
+- **In-cluster DNS name** (e.g. `open-match-frontend.open-match.svc.cluster.local:50504`) - works if `agones-conductor-mcp` itself runs as a Pod in the same cluster.
+- **[NodePort or LoadBalancer](https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types)** - a Kubernetes Service type that exposes something inside the cluster to the outside; use this if `agones-conductor-mcp` runs outside the cluster.
 - **A [`kubectl port-forward`](https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/)** you've started yourself, forwarding a local port to the Frontend service - the quickest option for local testing.
 
 Set `AGONES_MCP_OPEN_MATCH_FRONTEND` to whichever of these applies:
@@ -164,7 +176,7 @@ Set `AGONES_MCP_OPEN_MATCH_FRONTEND` to whichever of these applies:
 {
   "mcpServers": {
     "agones": {
-      "command": "/path/to/agones-mcp",
+      "command": "/path/to/agones-conductor-mcp",
       "env": { "AGONES_MCP_OPEN_MATCH_FRONTEND": "open-match-frontend.open-match.svc.cluster.local:50504" }
     }
   }
@@ -173,18 +185,18 @@ Set `AGONES_MCP_OPEN_MATCH_FRONTEND` to whichever of these applies:
 
 In multi-cluster mode, use `AGONES_MCP_OPEN_MATCH_FRONTENDS` instead: a comma-separated `clusterName=host:port` list, matching the names in `AGONES_MCP_CLUSTERS`. Clusters without an entry simply have Open Match tools disabled for them.
 
-This server doesn't do any matchmaking itself. Open Match's own architecture needs two other pieces to actually turn tickets into matches: a **match function** (your matchmaking logic - which players belong together) and a **director** (polls Open Match for proposed matches and finalizes them). Those are things you write and deploy separately, following [Open Match's own docs](https://open-match.dev/site/docs/). `agones-mcp` only creates, checks, and cancels tickets against whatever pipeline you've already got running - `allocate_gameserver` has the identical relationship to Agones's own allocator, calling it rather than deciding server placement itself.
+This server doesn't do any matchmaking itself. Open Match's own architecture needs two other pieces to actually turn tickets into matches: a **match function** (your matchmaking logic - which players belong together) and a **director** (polls Open Match for proposed matches and finalizes them). Those are things you write and deploy separately, following [Open Match's own docs](https://open-match.dev/site/docs/). `agones-conductor-mcp` only creates, checks, and cancels tickets against whatever pipeline you've already got running - `allocate_gameserver` has the identical relationship to Agones's own allocator, calling it rather than deciding server placement itself.
 
 ### Permissions
 
 Don't run this server with broad cluster-admin-style access. [RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) (Role-Based Access Control) is how Kubernetes scopes what an identity is allowed to do, and `deploy/rbac.yaml` defines the minimal set this server actually needs (see that file's own comments for the exact list). A `ClusterRole` by itself grants nothing: it's a named bundle of permissions that only takes effect once bound to an identity via a `ClusterRoleBinding`. If this server runs inside the cluster as a Pod, bind it to that Pod's [ServiceAccount](https://kubernetes.io/docs/concepts/security/service-accounts/); if it runs externally via kubeconfig, apply an equivalent grant to whichever identity that kubeconfig authenticates as.
 
-Concretely, for a ServiceAccount named `agones-mcp` in namespace `default`:
+Concretely, for a ServiceAccount named `agones-conductor-mcp` in namespace `default`:
 
 ```sh
 kubectl apply -f deploy/rbac.yaml
-kubectl create serviceaccount agones-mcp -n default
-kubectl create clusterrolebinding agones-mcp --clusterrole=agones-mcp --serviceaccount=default:agones-mcp
+kubectl create serviceaccount agones-conductor-mcp -n default
+kubectl create clusterrolebinding agones-conductor-mcp --clusterrole=agones-conductor-mcp --serviceaccount=default:agones-conductor-mcp
 ```
 
 Every tool has been re-run against a real cluster under this exact role, bound to a fresh ServiceAccount with no other access. Nothing needs more than what's granted here, and a permission matrix confirmed the excess verbs (pod reads, secret access, gameserver writes, and more) are denied.
@@ -200,3 +212,4 @@ Issues and PRs welcome. This project aims to be useful to anyone running Agones,
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
