@@ -1,9 +1,9 @@
 module github.com/nicklesimba/agones-mcp
 
-go 1.25.0
+go 1.26
 
 require (
-	agones.dev/agones v1.57.0
+	agones.dev/agones v1.59.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.10
