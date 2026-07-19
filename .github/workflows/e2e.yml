@@ -43,9 +43,14 @@ jobs:
             --set agones.extensions.replicas=1 \
             --wait --timeout 10m
 
+      # The upstream example names its fleet simple-game-server; the e2e
+      # suite expects simple-fleet, so rename the fleet (and only the fleet:
+      # the container inside shares the name, hence the indent-anchored sed).
       - name: Deploy the example fleet
         run: |
-          kubectl apply -f https://raw.githubusercontent.com/googleforgames/agones/release-1.57.0/examples/simple-game-server/fleet.yaml
+          curl -fsSL https://raw.githubusercontent.com/googleforgames/agones/release-1.57.0/examples/simple-game-server/fleet.yaml \
+            | sed 's/^  name: simple-game-server$/  name: simple-fleet/' \
+            | kubectl apply -f -
           kubectl wait fleet/simple-fleet --for=jsonpath='{.status.readyReplicas}'=2 --timeout=300s
 
       - name: Provision least-privilege ServiceAccount
