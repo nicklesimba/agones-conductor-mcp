@@ -26,13 +26,22 @@ jobs:
         with:
           cluster_name: agones-e2e
 
+      # Allocator and ping ship as LoadBalancer services, which never get an
+      # IP in kind, so helm --wait can't ever succeed with them installed.
+      # Nothing here needs them: allocations go through the extensions
+      # aggregated API. Single replicas keep the 2-core runner happy.
       - name: Install Agones
         run: |
           helm repo add agones https://agones.dev/chart/stable
           helm repo update
           helm install agones agones/agones \
             --namespace agones-system --create-namespace \
-            --version 1.57.0 --wait --timeout 10m
+            --version 1.57.0 \
+            --set agones.allocator.install=false \
+            --set agones.ping.install=false \
+            --set agones.controller.replicas=1 \
+            --set agones.extensions.replicas=1 \
+            --wait --timeout 10m
 
       - name: Deploy the example fleet
         run: |
